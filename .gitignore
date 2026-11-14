@@ -1,0 +1,8 @@
+# The patcher binary is downloaded on demand and SHA-256 verified; never commit it.
+universal-checksum-patcher.exe
+
+# Game-file backups never belong in this repo.
+*.backup
+
+# Temporary downloads.
+.ucp-*.tmp
