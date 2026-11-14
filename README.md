@@ -113,6 +113,23 @@ Steam 更新、验证文件完整性、重装都会替换 `hoi4.exe`：
 - 不要分发修改后的 `hoi4.exe`（版权）。本仓库只分发脚本。
 - 使用后果自负。
 
+## 分发与创意工坊
+
+发布包（源码，无二进制）：
+
+```powershell
+.\scripts\Build-Release.ps1 -Version 1.0.0
+# -> dist/hoi4-achievements-with-mods-v1.0.0.zip，并输出 SHA-256
+```
+
+**这个工具不能做成 HOI4 创意工坊 mod。** 原因：
+
+- 创意工坊 mod 只能提供游戏数据（`common/`、`gfx/`、`localisation/` 等），不能修改 `hoi4.exe`；
+- 成就的 checksum 验证在引擎可执行文件内，mod 脚本无权绕过；
+- Steam 工坊不允许分发修改游戏的可执行补丁，订阅者也不会自动得到补丁。
+
+工坊条目最多只能做一个"说明/辅助"的空 mod，无法真正解锁成就。因此本工具通过 zip / GitHub Releases 分发，每位玩家在本地运行。
+
 ## 致谢
 
 - [IlliaYalovoi/universal-checksum-patcher](https://github.com/IlliaYalovoi/universal-checksum-patcher)（MIT）：实际打补丁的官方工具，本仓库脚本封装并校验它。

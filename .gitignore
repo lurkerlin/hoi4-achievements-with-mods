@@ -6,3 +6,6 @@ universal-checksum-patcher.exe
 
 # Temporary downloads.
 .ucp-*.tmp
+
+# Release archives.
+dist/
