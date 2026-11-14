@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Enable Steam achievements in Hearts of Iron IV while mods are active.
 

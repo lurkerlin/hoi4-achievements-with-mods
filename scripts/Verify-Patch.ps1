@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Byte-level verification that hoi4.exe differs from hoi4.exe.backup by exactly
   the expected single byte (0x85 -> 0x31).

@@ -1,4 +1,4 @@
-# Shared configuration and Steam/HOI4 discovery for this repo's scripts.
+﻿# Shared configuration and Steam/HOI4 discovery for this repo's scripts.
 # Dot-source it from a script:  . (Join-Path $PSScriptRoot 'Common.ps1')
 
 $PatcherVersion = 'v1.0.1'

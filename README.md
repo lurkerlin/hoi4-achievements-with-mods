@@ -14,7 +14,25 @@
 | 备份 | `hoi4.exe.backup`，与原文件逐字节一致 |
 | 验证 | `fc /b` 只报告这一处差异 |
 
-## 快速开始
+## 图形界面（双击）
+
+双击仓库根目录的 **`启动.bat`**，窗口里会显示：
+
+- 游戏目录、游戏版本、`hoi4.exe` 大小与修改时间、启用 Mod 数、当前补丁状态；
+- 点 **打补丁**：自动下载并 SHA-256 校验 patcher、备份 exe、应用补丁、字节级复核，全过程逐行写入日志；
+- **还原原版** / **刷新信息** / **打开游戏目录**。
+
+下载在后台异步进行，窗口不会冻结；GitHub 失败时自动切换 gh-proxy / ghfast 镜像。
+
+也可以不开窗口：
+
+```powershell
+.\scripts\Hoi4AchievementsGui.ps1 -RunAction patch     # 直接打补丁
+.\scripts\Hoi4AchievementsGui.ps1 -RunAction restore   # 直接还原
+.\scripts\Hoi4AchievementsGui.ps1 -SelfTest            # 只打印版本与状态
+```
+
+## 命令行
 
 ```powershell
 # 1. 打补丁：自动定位游戏、下载并 SHA-256 校验 patcher、备份 exe
@@ -58,10 +76,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Patch-Hoi4.ps1 -Ac
 ## 目录
 
 ```
-scripts/Common.ps1        共享：Steam 库探测、SHA-256、下载
-scripts/Patch-Hoi4.ps1    一键入口（patch/status/restore/verify）
-scripts/Verify-Patch.ps1  字节级差异验证
-docs/how-it-works.md      原理、1.19.5 实测偏移、版本适配
+启动.bat                          双击启动图形界面
+scripts/Hoi4AchievementsGui.ps1   图形界面（含 -SelfTest / -RunAction 无窗口模式）
+scripts/Common.ps1                共享：Steam 库探测、SHA-256、下载
+scripts/Patch-Hoi4.ps1            命令行入口（patch/status/restore/verify）
+scripts/Verify-Patch.ps1          字节级差异验证
+docs/how-it-works.md              原理、1.19.5 实测偏移、版本适配
 ```
 
 仓库不含任何二进制。patcher 在运行时下载，校验哈希后放在游戏目录复用。
