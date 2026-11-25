@@ -33,7 +33,7 @@ $staging = Join-Path $env:TEMP ("hoi4-release-{0}" -f [guid]::NewGuid().ToString
 $pkg = Join-Path $staging 'hoi4-achievements-with-mods'
 New-Item -ItemType Directory -Force -Path $pkg | Out-Null
 
-$items = @('README.md', 'LICENSE', '.gitattributes', '.gitignore', 'scripts', 'docs', '启动.bat')
+$items = @('README.md', 'LICENSE', '.gitattributes', '.gitignore', 'scripts', 'docs', 'Launch.bat')
 foreach ($item in $items) {
     $src = Join-Path $root $item
     if (-not (Test-Path -LiteralPath $src)) { Write-Warning "skip missing: $item"; continue }

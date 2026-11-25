@@ -18,7 +18,7 @@
 
 ## 图形界面（双击）
 
-双击仓库根目录的 **`启动.bat`**，窗口里会显示：
+双击仓库根目录的 **`Launch.bat`**，窗口里会显示：
 
 - 游戏目录、游戏版本（含 exe 内嵌版本）、`hoi4.exe` 大小与修改时间、启用 Mod 数、当前补丁状态、备份状态（含版本比对）；
 - 点 **打补丁**：自动下载并 SHA-256 校验 patcher、备份 exe、应用补丁、字节级复核，全过程逐行写入日志；旧版本备份会自动保留并重建当前版本备份；
@@ -79,7 +79,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Patch-Hoi4.ps1 -Ac
 ## 目录
 
 ```
-启动.bat                          双击启动图形界面
+Launch.bat                        双击启动图形界面
 scripts/Hoi4AchievementsGui.ps1   图形界面（含 -SelfTest / -RunAction 无窗口模式）
 scripts/Common.ps1                共享：Steam 库探测、SHA-256、下载、gate 定位、备份维护
 scripts/Patch-Hoi4.ps1            命令行入口（patch/status/restore/verify/rebuild-backup）
