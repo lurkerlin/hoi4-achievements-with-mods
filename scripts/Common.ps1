@@ -1,6 +1,10 @@
 ﻿# Shared configuration and Steam/HOI4 discovery for this repo's scripts.
 # Dot-source it from a script:  . (Join-Path $PSScriptRoot 'Common.ps1')
 
+# The patcher writes UTF-8 (box drawing, check marks). Keep PowerShell's
+# native-command decoding in sync so its output is not mangled on CP936.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
 $PatcherVersion = 'v1.0.1'
 $PatcherAsset   = 'universal-checksum-patcher.exe'
 $PatcherSha256  = '8effc011e77b6059fc462cd331b9eec1bbcf83cc75fac1d1f7db23fa3cd2e63c'
@@ -112,4 +116,380 @@ function Get-PatcherExe {
     }
 
     throw "Could not obtain a verified $PatcherAsset. Download it manually from $PatcherRelease and place it in '$GameDir'."
+}
+
+# ---------------------------------------------------------------------------
+# Local gate inspection. Mirrors universal-checksum-patcher's signature for
+# hoi4.exe (anchor "Active Mod Count:", find "85 C0 0F 94 ?? E8", replace
+# "31 C0", requireInFunc, expectMatches 1), so status/verify work offline and
+# never depend on an outdated .backup.
+# ---------------------------------------------------------------------------
+
+if (-not ('Hoi4Patch.GateInspector' -as [type])) {
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace Hoi4Patch
+{
+    public sealed class GateResult
+    {
+        public string Status;        // patched | unpatched | unsupported | ambiguous | error
+        public long GateOffset = -1; // file offset of the located gate
+        public int PatchedMatches;
+        public int UnpatchedMatches;
+        public string Message = "";
+    }
+
+    internal sealed class Sec
+    {
+        public string Name;
+        public uint VA;
+        public uint VSize;
+        public uint RawSize;
+        public uint RawPtr;
+    }
+
+    internal struct Fn
+    {
+        public uint Begin;
+        public uint End;
+    }
+
+    public static class GateInspector
+    {
+        const string Anchor = "Active Mod Count:";
+
+        public static GateResult InspectFile(string path)
+        {
+            return Inspect(System.IO.File.ReadAllBytes(path));
+        }
+
+        public static GateResult Inspect(byte[] d)
+        {
+            GateResult r = new GateResult();
+            try
+            {
+                if (d == null || d.Length < 0x40) { r.Status = "error"; r.Message = "file too small"; return r; }
+                int pe = BitConverter.ToInt32(d, 0x3C);
+                if (pe <= 0 || pe + 24 > d.Length || d[pe] != 0x50 || d[pe + 1] != 0x45 || d[pe + 2] != 0 || d[pe + 3] != 0)
+                { r.Status = "error"; r.Message = "not a PE file"; return r; }
+
+                ushort machine = BitConverter.ToUInt16(d, pe + 4);
+                int nsec = BitConverter.ToUInt16(d, pe + 6);
+                int optsz = BitConverter.ToUInt16(d, pe + 20);
+                int opt = pe + 24;
+                if (optsz <= 0 || opt + optsz > d.Length) { r.Status = "error"; r.Message = "truncated optional header"; return r; }
+                ushort magic = BitConverter.ToUInt16(d, opt);
+                if (magic != 0x20B) { r.Status = "error"; r.Message = "not PE32+ (x64)"; return r; }
+                if (machine != 0x8664) { r.Status = "error"; r.Message = "machine is not x64"; return r; }
+                if (opt + 112 + 32 > d.Length) { r.Status = "error"; r.Message = "truncated data directory"; return r; }
+
+                ulong imageBase = BitConverter.ToUInt64(d, opt + 24);
+
+                List<Sec> secs = new List<Sec>();
+                int so = opt + optsz;
+                for (int i = 0; i < nsec; i++)
+                {
+                    int o = so + i * 40;
+                    if (o + 40 > d.Length) break;
+                    Sec s = new Sec();
+                    s.Name = Encoding.ASCII.GetString(d, o, 8).TrimEnd('\0');
+                    s.VSize = BitConverter.ToUInt32(d, o + 8);
+                    s.VA = BitConverter.ToUInt32(d, o + 12);
+                    s.RawSize = BitConverter.ToUInt32(d, o + 16);
+                    s.RawPtr = BitConverter.ToUInt32(d, o + 20);
+                    secs.Add(s);
+                }
+
+                Sec text = Find(secs, ".text");
+                if (text == null) { r.Status = "error"; r.Message = "no .text section"; return r; }
+                int textStart = (int)text.RawPtr;
+                int textLen = Math.Min((int)text.RawSize, d.Length - textStart);
+                if (textStart < 0 || textLen <= 0) { r.Status = "error"; r.Message = "bad .text section"; return r; }
+
+                List<Fn> funcs = new List<Fn>();
+                Sec pdata = Find(secs, ".pdata");
+                if (pdata != null)
+                {
+                    int po = RvaToOff(secs, pdata.VA);
+                    if (po >= 0)
+                    {
+                        long pend = Math.Min((long)d.Length, (long)po + pdata.RawSize);
+                        for (long o = po; o + 12 <= pend; o += 12)
+                        {
+                            uint b = BitConverter.ToUInt32(d, (int)o);
+                            uint e = BitConverter.ToUInt32(d, (int)o + 4);
+                            if (b < e) { Fn f; f.Begin = b; f.End = e; funcs.Add(f); }
+                        }
+                        funcs.Sort(delegate(Fn a, Fn b) { return a.Begin.CompareTo(b.Begin); });
+                    }
+                }
+
+                HashSet<long> anchorRanges = new HashSet<long>();
+                foreach (ulong va in StringVAs(d, secs, imageBase, Anchor))
+                {
+                    for (int i = 0; i + 7 <= textLen; i++)
+                    {
+                        int p = textStart + i;
+                        byte b0 = d[p];
+                        if (b0 != 0x48 && b0 != 0x49 && b0 != 0x4C && b0 != 0x4D) continue;
+                        if (d[p + 1] != 0x8D || (d[p + 2] & 0xC7) != 0x05) continue;
+                        int disp = BitConverter.ToInt32(d, p + 3);
+                        long targetRva = (long)text.VA + i + 7 + disp;
+                        if (imageBase + (ulong)targetRva != va) continue;
+                        Fn fr;
+                        if (FuncContains(funcs, text.VA + (uint)i, out fr))
+                            anchorRanges.Add(((long)fr.Begin << 32) | fr.End);
+                    }
+                }
+
+                if (anchorRanges.Count == 0)
+                {
+                    r.Status = "unsupported";
+                    r.Message = "anchor \"" + Anchor + "\" not referenced by any .pdata function";
+                    return r;
+                }
+
+                int patched = 0, unpatched = 0;
+                long patchedOff = -1, unpatchedOff = -1;
+                for (int i = 0; i + 6 <= textLen; i++)
+                {
+                    int p = textStart + i;
+                    if (d[p] != 0x31 || d[p + 1] != 0xC0 || d[p + 2] != 0x0F || d[p + 3] != 0x94 || d[p + 5] != 0xE8) continue;
+                    Fn fr;
+                    if (!FuncContains(funcs, text.VA + (uint)i, out fr)) continue;
+                    if (!anchorRanges.Contains(((long)fr.Begin << 32) | fr.End)) continue;
+                    patched++;
+                    if (patchedOff < 0) patchedOff = p;
+                }
+                for (int i = 0; i + 6 <= textLen; i++)
+                {
+                    int p = textStart + i;
+                    if (d[p] != 0x85 || d[p + 1] != 0xC0 || d[p + 2] != 0x0F || d[p + 3] != 0x94 || d[p + 5] != 0xE8) continue;
+                    Fn fr;
+                    if (!FuncContains(funcs, text.VA + (uint)i, out fr)) continue;
+                    if (!anchorRanges.Contains(((long)fr.Begin << 32) | fr.End)) continue;
+                    unpatched++;
+                    if (unpatchedOff < 0) unpatchedOff = p;
+                }
+
+                r.PatchedMatches = patched;
+                r.UnpatchedMatches = unpatched;
+
+                if (unpatched == 0)
+                {
+                    if (patched == 1) { r.Status = "patched"; r.GateOffset = patchedOff; }
+                    else if (patched > 1) { r.Status = "ambiguous"; r.Message = "found " + patched + " patched gates, expected 1"; }
+                    else { r.Status = "unsupported"; r.Message = "no patched or unpatched gate in the anchored function"; }
+                }
+                else if (unpatched != 1)
+                {
+                    r.Status = "ambiguous"; r.Message = "found " + unpatched + " unpatched gates, expected 1";
+                }
+                else
+                {
+                    r.Status = "unpatched"; r.GateOffset = unpatchedOff;
+                }
+                return r;
+            }
+            catch (Exception ex)
+            {
+                r.Status = "error"; r.Message = ex.Message; return r;
+            }
+        }
+
+        static Sec Find(List<Sec> secs, string name)
+        {
+            foreach (Sec s in secs) if (s.Name == name) return s;
+            return null;
+        }
+
+        static int RvaToOff(List<Sec> secs, uint rva)
+        {
+            foreach (Sec s in secs)
+            {
+                uint span = Math.Max(s.VSize, s.RawSize);
+                if (rva >= s.VA && rva < s.VA + span)
+                    return (int)(s.RawPtr + (rva - s.VA));
+            }
+            return -1;
+        }
+
+        static bool FuncContains(List<Fn> funcs, uint rva, out Fn found)
+        {
+            int lo = 0, hi = funcs.Count - 1, ans = -1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) / 2;
+                if (funcs[mid].End > rva) { ans = mid; hi = mid - 1; } else lo = mid + 1;
+            }
+            if (ans >= 0 && rva >= funcs[ans].Begin && rva < funcs[ans].End) { found = funcs[ans]; return true; }
+            found = new Fn(); return false;
+        }
+
+        static List<ulong> StringVAs(byte[] d, List<Sec> secs, ulong imageBase, string s)
+        {
+            List<ulong> outv = new List<ulong>();
+            byte[] needle = Encoding.ASCII.GetBytes(s);
+            foreach (Sec sec in secs)
+            {
+                int start = (int)sec.RawPtr;
+                int end = Math.Min(d.Length, start + (int)sec.RawSize);
+                for (int at = start; at + needle.Length <= end; at++)
+                {
+                    bool ok = true;
+                    for (int k = 0; k < needle.Length; k++) if (d[at + k] != needle[k]) { ok = false; break; }
+                    if (!ok) continue;
+                    if (at == 0 || d[at - 1] == 0)
+                        outv.Add(imageBase + (ulong)sec.VA + (ulong)(at - start));
+                }
+            }
+            return outv;
+        }
+    }
+}
+'@
+}
+
+function Get-Hoi4GateState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ExePath)
+
+    if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
+        throw "File not found: $ExePath"
+    }
+    $full = (Resolve-Path -LiteralPath $ExePath).Path
+    return [Hoi4Patch.GateInspector]::InspectFile($full)
+}
+
+function Format-Hoi4GateState {
+    param([Parameter(Mandatory)]$Gate)
+
+    switch ([string]$Gate.Status) {
+        'patched'     { return '已打补丁（gate 签名验证通过）' }
+        'unpatched'   { return '未打补丁' }
+        'unsupported' { return '版本不支持（未找到唯一 gate）' }
+        'ambiguous'   { return "异常：$($Gate.Message)" }
+        'error'       { return "无法检查：$($Gate.Message)" }
+        default       { return [string]$Gate.Status }
+    }
+}
+
+function Get-Hoi4BackupState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ExePath)
+
+    $bak = "$ExePath.backup"
+    $state = [pscustomobject]@{
+        Path   = $bak
+        Exists = $false
+        Usable = $false
+        Reason = '无备份'
+        Gate   = $null
+    }
+    if (-not (Test-Path -LiteralPath $bak -PathType Leaf)) { return $state }
+
+    $state.Exists = $true
+    $exeLen = (Get-Item -LiteralPath $ExePath).Length
+    $bakLen = (Get-Item -LiteralPath $bak).Length
+    if ($bakLen -ne $exeLen) {
+        $state.Reason = '旧版本备份（大小不同，还原会降级游戏）'
+        return $state
+    }
+
+    $bakGate = Get-Hoi4GateState -ExePath $bak
+    $state.Gate = $bakGate
+    if ($bakGate.Status -ne 'unpatched') {
+        $state.Reason = "备份不可用于还原：$(Format-Hoi4GateState $bakGate)"
+        return $state
+    }
+
+    $exeGate = Get-Hoi4GateState -ExePath $ExePath
+    if ($exeGate.Status -ne 'patched' -and $exeGate.Status -ne 'unpatched') {
+        $state.Reason = "无法验证当前 exe：$(Format-Hoi4GateState $exeGate)"
+        return $state
+    }
+    if ($exeGate.GateOffset -ne $bakGate.GateOffset) {
+        $state.Reason = '备份来自另一构建（gate 偏移不同，拒绝还原）'
+        return $state
+    }
+
+    $state.Usable = $true
+    $state.Reason = '与当前版本匹配（可还原）'
+    return $state
+}
+
+function Move-Hoi4StaleBackup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [scriptblock]$Log
+    )
+
+    $bak = "$ExePath.backup"
+    if (-not (Test-Path -LiteralPath $bak -PathType Leaf)) { return $null }
+
+    $state = Get-Hoi4BackupState -ExePath $ExePath
+    if ($state.Usable) { return $null }
+
+    $dest = "$bak.old-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    if (Test-Path -LiteralPath $dest) { $dest = "$dest-$([guid]::NewGuid().ToString('N').Substring(0, 6))" }
+    Move-Item -LiteralPath $bak -Destination $dest
+    if ($Log) { & $Log "旧备份不可用（$($state.Reason)），已保留为 $(Split-Path $dest -Leaf)" }
+    return $dest
+}
+
+function New-Hoi4BackupFromPatched {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [scriptblock]$Log
+    )
+
+    $gate = Get-Hoi4GateState -ExePath $ExePath
+    if ($gate.Status -ne 'patched') {
+        throw "hoi4.exe 不是已打补丁状态（$(Format-Hoi4GateState $gate)），无法据此重建备份。"
+    }
+
+    $off = [int]$gate.GateOffset
+    $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $ExePath).Path)
+    if ($off -lt 0 -or $off + 2 -gt $bytes.Length) { throw 'gate 偏移越界，拒绝重建备份。' }
+    if ($bytes[$off] -ne 0x31 -or $bytes[$off + 1] -ne 0xC0) { throw 'gate 字节不是 31 C0，拒绝重建备份。' }
+    $bytes[$off] = 0x85
+
+    $dir = Split-Path -Parent (Resolve-Path -LiteralPath $ExePath).Path
+    $bak = "$ExePath.backup"
+    $tmp = Join-Path $dir ('.ucp-backup-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    try {
+        [System.IO.File]::WriteAllBytes($tmp, $bytes)
+        $check = Get-Hoi4GateState -ExePath $tmp
+        if ($check.Status -ne 'unpatched' -or $check.GateOffset -ne $off) {
+            throw '重建备份自检失败：gate 未能还原为 85 C0。'
+        }
+        if (Test-Path -LiteralPath $bak -PathType Leaf) {
+            $dest = "$bak.old-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            if (Test-Path -LiteralPath $dest) { $dest = "$dest-$([guid]::NewGuid().ToString('N').Substring(0, 6))" }
+            Move-Item -LiteralPath $bak -Destination $dest
+            if ($Log) { & $Log "原有备份已保留为 $(Split-Path $dest -Leaf)" }
+        }
+        Move-Item -LiteralPath $tmp -Destination $bak
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
+    if ($Log) { & $Log ("已重建 hoi4.exe.backup（偏移 0x{0:X}：31 C0 → 85 C0）" -f $off) }
+}
+
+function Remove-AnsiText {
+    param([string]$Text)
+    $esc = [regex]::Escape([string][char]27)
+    return (($Text -replace ($esc + '\[[0-9;?]*[ -/]*[@-~]'), '') -replace "`r", '')
+}
+
+function Assert-Hoi4NotRunning {
+    $p = @(Get-Process -Name 'hoi4' -ErrorAction SilentlyContinue)
+    if ($p.Count -gt 0) {
+        throw '检测到 hoi4 正在运行，请先完全退出游戏再操作。'
+    }
 }

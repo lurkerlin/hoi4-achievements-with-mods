@@ -39,7 +39,7 @@ if (-not (Test-PeHeader $exe)) { Write-Error "Patched hoi4.exe is not a valid PE
 if (-not (Test-PeHeader $bak)) { Write-Error "Backup is not a valid PE (MZ missing)."; exit 1 }
 
 if ((Get-Item -LiteralPath $exe).Length -ne (Get-Item -LiteralPath $bak).Length) {
-    Write-Error "hoi4.exe and its backup differ in size - the game was probably updated; re-run patch."
+    Write-Error "hoi4.exe 与备份大小不同：备份来自旧版本，无法用于验证或还原。运行 Patch-Hoi4.ps1 -Action patch 会重建备份（$bak.old-* 保留旧文件）。"
     exit 1
 }
 

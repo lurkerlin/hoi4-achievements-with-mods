@@ -32,13 +32,6 @@ $script:LogBox      = $null
 $script:StatusLabel = $null
 $script:IsWorking   = $false
 
-function Remove-Ansi {
-    param([string]$Text)
-    $esc = [regex]::Escape([string][char]27)
-    $clean = $Text -replace ($esc + '\[[0-9;?]*[ -/]*[@-~]'), ''
-    return ($clean -replace "`r", '')
-}
-
 function Write-UiLog {
     param([string]$Message)
     $line = '[' + (Get-Date -Format 'HH:mm:ss') + '] ' + $Message
@@ -55,29 +48,11 @@ function Get-PatchState {
     param([string]$Dir)
 
     $exe = Join-Path $Dir 'hoi4.exe'
-    $bak = "$exe.backup"
-    if (-not (Test-Path -LiteralPath $bak)) { return '未打补丁（无备份）' }
-    if ((Get-Item -LiteralPath $exe).Length -ne (Get-Item -LiteralPath $bak).Length) {
-        return '需要重打（exe 已更新）'
+    try {
+        return (Format-Hoi4GateState (Get-Hoi4GateState -ExePath $exe))
+    } catch {
+        return "无法检查：$($_.Exception.Message)"
     }
-
-    $fc = Join-Path $env:SystemRoot 'System32\fc.exe'
-    $lines = @(& $fc /b $bak $exe 2>&1)
-    $code = $LASTEXITCODE
-    if ($code -eq 0) { return '未打补丁（exe 与备份一致）' }
-    if ($code -ne 1) { return '未知（fc 检查失败）' }
-
-    $diffs = @()
-    foreach ($ln in $lines) {
-        $s = [string]$ln
-        if ($s -match '^\s*[0-9A-Fa-f]+:\s+([0-9A-Fa-f]{2})\s+([0-9A-Fa-f]{2})\s*$') {
-            $diffs += ,@([Convert]::ToByte($matches[1], 16), [Convert]::ToByte($matches[2], 16))
-        }
-    }
-    if ($diffs.Count -eq 1 -and $diffs[0][0] -eq 0x85 -and $diffs[0][1] -eq 0x31) {
-        return '已打补丁（成就解锁生效）'
-    }
-    return ("异常差异（$($diffs.Count) 字节），建议还原后重打")
 }
 
 function Get-GameInfo {
@@ -93,6 +68,7 @@ function Get-GameInfo {
         ExeTime    = $null
         Mods       = 0
         State      = '未知'
+        Backup     = '未知'
         Patcher    = '未下载'
     }
 
@@ -125,6 +101,9 @@ function Get-GameInfo {
     }
 
     $info.State = Get-PatchState -Dir $Dir
+    if (Test-Path -LiteralPath $exe) {
+        try { $info.Backup = (Get-Hoi4BackupState -ExePath $exe).Reason } catch { $info.Backup = "无法检查：$($_.Exception.Message)" }
+    }
     return $info
 }
 
@@ -183,45 +162,57 @@ function Get-PatcherWithUi {
     throw '无法获取校验通过的 patcher。可手动下载后放进游戏目录。'
 }
 
-function Invoke-PatcherAction {
-    param([string]$Patcher, [string]$Action, [string]$Dir)
-
-    $exe = Join-Path $Dir 'hoi4.exe'
-    Write-UiLog "执行：universal-checksum-patcher.exe $Action"
-    $out = @(& $Patcher $Action $exe 2>&1)
-    $code = $LASTEXITCODE
-    foreach ($line in $out) {
-        $clean = Remove-Ansi ([string]$line)
-        if ($clean.Trim()) { Write-UiLog $clean }
-    }
-    return $code
-}
-
 function Invoke-Workflow {
     param([ValidateSet('patch', 'restore')][string]$Action)
 
     if (-not (Assert-NotRunning)) { return 1 }
     $dir = Find-Hoi4Dir
+    $exe = Join-Path $dir 'hoi4.exe'
     Write-UiLog "游戏目录：$dir"
 
-    $patcher = Get-PatcherWithUi -GameDir $dir
-    $code = Invoke-PatcherAction -Patcher $patcher -Action $Action -Dir $dir
-    if ($code -ne 0) {
-        Write-UiLog "patcher 退出码：$code"
-        return $code
+    if ($Action -eq 'restore') {
+        $bak = Get-Hoi4BackupState -ExePath $exe
+        if (-not $bak.Usable) {
+            Write-UiLog "拒绝还原：$($bak.Reason)"
+            Write-UiLog '请用 Steam 验证游戏完整性恢复原版，或先点“打补丁”重建备份。'
+            return 1
+        }
+    } else {
+        $null = Move-Hoi4StaleBackup -ExePath $exe -Log { param($m) Write-UiLog $m }
     }
 
-    $state = Get-PatchState -Dir $dir
-    Write-UiLog "补丁状态：$state"
+    $patcher = Get-PatcherWithUi -GameDir $dir
+    Write-UiLog "执行：universal-checksum-patcher.exe $Action"
+    $out = @(& $patcher $Action $exe 2>&1)
+    foreach ($line in $out) {
+        $clean = (Remove-AnsiText ([string]$line)).TrimEnd()
+        if ($clean) { Write-UiLog $clean }
+    }
+
+    $gate = Get-Hoi4GateState -ExePath $exe
 
     if ($Action -eq 'patch') {
-        if ($state -like '已打补丁*') {
-            Write-UiLog '完成。以铁人模式 + 单人启动游戏即可继续解成就。'
-            return 0
+        if ($gate.Status -ne 'patched') {
+            Write-UiLog "补丁未生效：$(Format-Hoi4GateState $gate)"
+            return 1
         }
-        Write-UiLog '状态未达预期，请查看日志。'
+        $bak = Get-Hoi4BackupState -ExePath $exe
+        if (-not $bak.Usable) {
+            Write-UiLog "备份不可用：$($bak.Reason)；正在从已打补丁的 exe 重建。"
+            New-Hoi4BackupFromPatched -ExePath $exe -Log { param($m) Write-UiLog $m }
+            $bak = Get-Hoi4BackupState -ExePath $exe
+        }
+        Write-UiLog "补丁状态：$(Format-Hoi4GateState $gate)"
+        Write-UiLog "备份状态：$($bak.Reason)"
+        Write-UiLog '完成。以铁人模式 + 单人启动游戏即可继续解成就。'
+        return 0
+    }
+
+    if ($gate.Status -ne 'unpatched') {
+        Write-UiLog "还原后检查失败：$(Format-Hoi4GateState $gate)"
         return 1
     }
+    Write-UiLog '已还原为原版。'
     return 0
 }
 
@@ -238,6 +229,7 @@ if ($SelfTest) {
     "ExeTime    = $($info.ExeTime)"
     "Mods       = $($info.Mods)"
     "State      = $($info.State)"
+    "Backup     = $($info.Backup)"
     "Patcher    = $($info.Patcher)"
     exit 0
 }
@@ -256,7 +248,7 @@ if ($RunAction) {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'HOI4 成就 + Mod 解锁'
-$form.ClientSize = New-Object System.Drawing.Size(780, 620)
+$form.ClientSize = New-Object System.Drawing.Size(780, 680)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'Sizable'
 $form.MaximizeBox = $false
@@ -266,7 +258,7 @@ $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $grpInfo = New-Object System.Windows.Forms.GroupBox
 $grpInfo.Text = '游戏信息'
 $grpInfo.Location = New-Object System.Drawing.Point(12, 10)
-$grpInfo.Size = New-Object System.Drawing.Size(756, 180)
+$grpInfo.Size = New-Object System.Drawing.Size(756, 206)
 $form.Controls.Add($grpInfo)
 
 function New-InfoRow {
@@ -292,36 +284,37 @@ $lblExe     = New-InfoRow $grpInfo 78 'hoi4.exe'
 $lblMods    = New-InfoRow $grpInfo 104 '启用 Mod'
 $lblState   = New-InfoRow $grpInfo 130 '补丁状态'
 $lblTool    = New-InfoRow $grpInfo 156 '工具 / 签名'
+$lblBackup  = New-InfoRow $grpInfo 182 '备份状态'
 
 $btnPatch = New-Object System.Windows.Forms.Button
 $btnPatch.Text = '打补丁'
-$btnPatch.Location = New-Object System.Drawing.Point(12, 200)
+$btnPatch.Location = New-Object System.Drawing.Point(12, 226)
 $btnPatch.Size = New-Object System.Drawing.Size(150, 38)
 $btnPatch.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10, [System.Drawing.FontStyle]::Bold)
 $form.Controls.Add($btnPatch)
 
 $btnRestore = New-Object System.Windows.Forms.Button
 $btnRestore.Text = '还原原版'
-$btnRestore.Location = New-Object System.Drawing.Point(172, 200)
+$btnRestore.Location = New-Object System.Drawing.Point(172, 226)
 $btnRestore.Size = New-Object System.Drawing.Size(120, 38)
 $form.Controls.Add($btnRestore)
 
 $btnRefresh = New-Object System.Windows.Forms.Button
 $btnRefresh.Text = '刷新信息'
-$btnRefresh.Location = New-Object System.Drawing.Point(302, 200)
+$btnRefresh.Location = New-Object System.Drawing.Point(302, 226)
 $btnRefresh.Size = New-Object System.Drawing.Size(110, 38)
 $form.Controls.Add($btnRefresh)
 
 $btnOpen = New-Object System.Windows.Forms.Button
 $btnOpen.Text = '打开游戏目录'
-$btnOpen.Location = New-Object System.Drawing.Point(422, 200)
+$btnOpen.Location = New-Object System.Drawing.Point(422, 226)
 $btnOpen.Size = New-Object System.Drawing.Size(140, 38)
 $form.Controls.Add($btnOpen)
 
 $grpLog = New-Object System.Windows.Forms.GroupBox
 $grpLog.Text = '执行日志'
-$grpLog.Location = New-Object System.Drawing.Point(12, 248)
-$grpLog.Size = New-Object System.Drawing.Size(756, 340)
+$grpLog.Location = New-Object System.Drawing.Point(12, 274)
+$grpLog.Size = New-Object System.Drawing.Size(756, 370)
 $grpLog.Anchor = 'Top,Left,Right,Bottom'
 $form.Controls.Add($grpLog)
 
@@ -332,7 +325,7 @@ $logBox.ScrollBars = 'Vertical'
 $logBox.WordWrap = $false
 $logBox.Font = New-Object System.Drawing.Font('Consolas', 9)
 $logBox.Location = New-Object System.Drawing.Point(10, 20)
-$logBox.Size = New-Object System.Drawing.Size(736, 308)
+$logBox.Size = New-Object System.Drawing.Size(736, 338)
 $logBox.Anchor = 'Top,Left,Right,Top'
 $grpLog.Controls.Add($logBox)
 $logBox.Anchor = 'Top,Left,Right,Bottom'
@@ -357,6 +350,7 @@ function Update-GameInfo {
         $lblMods.Text = "$($info.Mods) 个"
         $lblState.Text = $info.State
         $lblTool.Text = "universal-checksum-patcher $PatcherVersion（内置签名：hoi4 / eu4 / eu5）"
+        $lblBackup.Text = $info.Backup
         return $info
     } catch {
         $lblGame.Text = $_.Exception.Message
@@ -365,6 +359,7 @@ function Update-GameInfo {
         $lblMods.Text = '-'
         $lblState.Text = '无法定位游戏'
         $lblTool.Text = "universal-checksum-patcher $PatcherVersion"
+        $lblBackup.Text = '-'
         return $null
     }
 }
