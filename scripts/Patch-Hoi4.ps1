@@ -46,8 +46,9 @@ $log = { param($m) Write-Host $m }
 switch ($Action) {
     'status' {
         $gate = Get-Hoi4GateState -ExePath $exe
-        $bak = Get-Hoi4BackupState -ExePath $exe
+        $bak = Get-Hoi4BackupState -ExePath $exe -ExeGate $gate
         Write-Host ("hoi4.exe : {0}" -f (Format-Hoi4GateState $gate))
+        if ($gate.Version) { Write-Host ("version  : {0}" -f $gate.Version) -ForegroundColor DarkGray }
         if ($gate.Status -eq 'patched' -or $gate.Status -eq 'unpatched') {
             Write-Host ("gate     : 0x{0:X}" -f $gate.GateOffset) -ForegroundColor DarkGray
         }
@@ -112,11 +113,11 @@ switch ($Action) {
             exit 1
         }
 
-        $bak = Get-Hoi4BackupState -ExePath $exe
+        $bak = Get-Hoi4BackupState -ExePath $exe -ExeGate $gate
         if (-not $bak.Usable) {
             Write-Host "备份不可用：$($bak.Reason)；正在从已打补丁的 exe 重建。" -ForegroundColor Yellow
             New-Hoi4BackupFromPatched -ExePath $exe -Log $log
-            $bak = Get-Hoi4BackupState -ExePath $exe
+            $bak = Get-Hoi4BackupState -ExePath $exe -ExeGate $gate
         }
 
         Write-Host ("gate     : {0}（0x{1:X}）" -f (Format-Hoi4GateState $gate), $gate.GateOffset) -ForegroundColor Green

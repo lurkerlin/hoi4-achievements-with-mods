@@ -44,17 +44,6 @@ function Write-UiLog {
     Write-Host $line
 }
 
-function Get-PatchState {
-    param([string]$Dir)
-
-    $exe = Join-Path $Dir 'hoi4.exe'
-    try {
-        return (Format-Hoi4GateState (Get-Hoi4GateState -ExePath $exe))
-    } catch {
-        return "无法检查：$($_.Exception.Message)"
-    }
-}
-
 function Get-GameInfo {
     param([string]$Dir)
 
@@ -64,6 +53,7 @@ function Get-GameInfo {
         Exe        = $exe
         Version    = '未知'
         RawVersion = ''
+        ExeVersion = ''
         ExeSize    = 0
         ExeTime    = $null
         Mods       = 0
@@ -100,9 +90,16 @@ function Get-GameInfo {
         $info.Patcher = "$PatcherVersion（已缓存）"
     }
 
-    $info.State = Get-PatchState -Dir $Dir
     if (Test-Path -LiteralPath $exe) {
-        try { $info.Backup = (Get-Hoi4BackupState -ExePath $exe).Reason } catch { $info.Backup = "无法检查：$($_.Exception.Message)" }
+        try {
+            $gate = Get-Hoi4GateState -ExePath $exe
+            $info.State = Format-Hoi4GateState $gate
+            $info.ExeVersion = [string]$gate.Version
+            $info.Backup = (Get-Hoi4BackupState -ExePath $exe -ExeGate $gate).Reason
+        } catch {
+            $info.State = "无法检查：$($_.Exception.Message)"
+            $info.Backup = $info.State
+        }
     }
     return $info
 }
@@ -196,13 +193,13 @@ function Invoke-Workflow {
             Write-UiLog "补丁未生效：$(Format-Hoi4GateState $gate)"
             return 1
         }
-        $bak = Get-Hoi4BackupState -ExePath $exe
+        $bak = Get-Hoi4BackupState -ExePath $exe -ExeGate $gate
         if (-not $bak.Usable) {
             Write-UiLog "备份不可用：$($bak.Reason)；正在从已打补丁的 exe 重建。"
             New-Hoi4BackupFromPatched -ExePath $exe -Log { param($m) Write-UiLog $m }
-            $bak = Get-Hoi4BackupState -ExePath $exe
+            $bak = Get-Hoi4BackupState -ExePath $exe -ExeGate $gate
         }
-        Write-UiLog "补丁状态：$(Format-Hoi4GateState $gate)"
+        Write-UiLog "补丁状态：$(Format-Hoi4GateState $gate)$(if ($gate.Version) { "（$($gate.Version)）" })"
         Write-UiLog "备份状态：$($bak.Reason)"
         Write-UiLog '完成。以铁人模式 + 单人启动游戏即可继续解成就。'
         return 0
@@ -225,6 +222,7 @@ if ($SelfTest) {
     "GameDir    = $($info.Dir)"
     "Version    = $($info.Version)"
     "RawVersion = $($info.RawVersion)"
+    "ExeVersion = $($info.ExeVersion)"
     "ExeSize    = $($info.ExeSize)"
     "ExeTime    = $($info.ExeTime)"
     "Mods       = $($info.Mods)"
@@ -345,7 +343,9 @@ function Update-GameInfo {
         $dir = Find-Hoi4Dir
         $info = Get-GameInfo -Dir $dir
         $lblGame.Text = $info.Dir
-        $lblVersion.Text = "$($info.Version)（raw $($info.RawVersion)）"
+        $lblVersion.Text =
+            if ($info.ExeVersion) { "$($info.Version) · exe $($info.ExeVersion)" }
+            else { "$($info.Version)（raw $($info.RawVersion)）" }
         $lblExe.Text = ('{0:N0} 字节 · {1:yyyy-MM-dd HH:mm}' -f $info.ExeSize, $info.ExeTime)
         $lblMods.Text = "$($info.Mods) 个"
         $lblState.Text = $info.State

@@ -65,9 +65,10 @@ fc /b hoi4.exe.backup hoi4.exe
 ## 备份与还原
 
 - patcher 只在没有 `.backup` 时写备份，所以游戏更新后旧备份会保留下来。
-- 脚本在 `patch` 前会把大小或 gate 偏移不一致的旧备份改名为 `.backup.old-<时间>`，让 patcher 写入当前版本的备份。
+- 版本号直接从 exe 内嵌的 `Operation Postern v<版本>` 字符串提取，不依赖 `launcher-settings.json`；备份与当前 exe 的版本串不同即判为旧备份，即使两者大小相同。
+- 脚本在 `patch` 前会把大小、内嵌版本或 gate 偏移不一致的旧备份改名为 `.backup.old-<时间>`，让 patcher 写入当前版本的备份。
 - 若 exe 已经打补丁但没有可用备份，`patch` 会复制 exe 并把 gate 的 `31 C0` 还原为 `85 C0`，得到与原版逐字节一致的备份。
-- `restore` 在备份与当前 exe 大小或 gate 偏移不一致时拒绝执行，避免把新版本游戏降级成旧 exe。
+- `restore` 在备份与当前 exe 大小、内嵌版本或 gate 偏移不一致时拒绝执行，避免把新版本游戏降级成旧 exe。
 
 ## 版本适配
 

@@ -21,25 +21,13 @@ $dir = Find-Hoi4Dir -Hint $GameDir
 $exe = Join-Path $dir 'hoi4.exe'
 $bak = "$exe.backup"
 
-if (-not (Test-Path -LiteralPath $bak)) {
+$bakState = Get-Hoi4BackupState -ExePath $exe
+if (-not $bakState.Exists) {
     Write-Error "Backup not found: $bak. Run Patch-Hoi4.ps1 -Action patch first."
     exit 1
 }
-
-function Test-PeHeader([string]$Path) {
-    $fs = [System.IO.File]::OpenRead($Path)
-    try {
-        $b = New-Object byte[] 2
-        $n = $fs.Read($b, 0, 2)
-        return ($n -eq 2 -and $b[0] -eq 0x4D -and $b[1] -eq 0x5A)
-    } finally { $fs.Dispose() }
-}
-
-if (-not (Test-PeHeader $exe)) { Write-Error "Patched hoi4.exe is not a valid PE (MZ missing)."; exit 1 }
-if (-not (Test-PeHeader $bak)) { Write-Error "Backup is not a valid PE (MZ missing)."; exit 1 }
-
-if ((Get-Item -LiteralPath $exe).Length -ne (Get-Item -LiteralPath $bak).Length) {
-    Write-Error "hoi4.exe 与备份大小不同：备份来自旧版本，无法用于验证或还原。运行 Patch-Hoi4.ps1 -Action patch 会重建备份（$bak.old-* 保留旧文件）。"
+if (-not $bakState.Usable) {
+    Write-Error "无法验证：$($bakState.Reason)。运行 Patch-Hoi4.ps1 -Action patch 重建备份。"
     exit 1
 }
 

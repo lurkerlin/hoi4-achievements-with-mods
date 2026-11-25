@@ -136,6 +136,7 @@ namespace Hoi4Patch
     public sealed class GateResult
     {
         public string Status;        // patched | unpatched | unsupported | ambiguous | error
+        public string Version = "";  // embedded "Operation Postern v..." build string
         public long GateOffset = -1; // file offset of the located gate
         public int PatchedMatches;
         public int UnpatchedMatches;
@@ -172,6 +173,7 @@ namespace Hoi4Patch
             try
             {
                 if (d == null || d.Length < 0x40) { r.Status = "error"; r.Message = "file too small"; return r; }
+                r.Version = FindVersion(d);
                 int pe = BitConverter.ToInt32(d, 0x3C);
                 if (pe <= 0 || pe + 24 > d.Length || d[pe] != 0x50 || d[pe + 1] != 0x45 || d[pe + 2] != 0 || d[pe + 3] != 0)
                 { r.Status = "error"; r.Message = "not a PE file"; return r; }
@@ -300,6 +302,56 @@ namespace Hoi4Patch
             }
         }
 
+        // The game embeds its build string as "Operation Postern v<version>".
+        // Return the most frequent token (ties broken by length) so stray
+        // changelog mentions of older builds do not win.
+        static string FindVersion(byte[] d)
+        {
+            byte[] prefix = Encoding.ASCII.GetBytes("Operation Postern v");
+            Dictionary<string, int> counts = new Dictionary<string, int>();
+            int n = d.Length;
+            int plen = prefix.Length;
+            for (int i = 0; i + plen < n; i++)
+            {
+                if (d[i] != prefix[0]) continue;
+                bool ok = true;
+                for (int k = 1; k < plen; k++) { if (d[i + k] != prefix[k]) { ok = false; break; } }
+                if (!ok) continue;
+
+                int start = i + plen;
+                int p = start;
+                while (p < n && p - start < 48)
+                {
+                    byte b = d[p];
+                    bool valid = (b >= (byte)'0' && b <= (byte)'9')
+                              || (b >= (byte)'a' && b <= (byte)'z')
+                              || (b >= (byte)'A' && b <= (byte)'Z')
+                              || b == (byte)'.';
+                    if (!valid) break;
+                    p++;
+                }
+                if (p <= start) continue;
+                string v = Encoding.ASCII.GetString(d, start, p - start).TrimEnd('.');
+                if (v.IndexOf('.') < 0 || v[0] < '0' || v[0] > '9') continue;
+
+                int c;
+                counts.TryGetValue(v, out c);
+                counts[v] = c + 1;
+            }
+
+            string best = "";
+            int bestCount = 0;
+            foreach (KeyValuePair<string, int> kv in counts)
+            {
+                if (kv.Value > bestCount || (kv.Value == bestCount && kv.Key.Length > best.Length))
+                {
+                    best = kv.Key;
+                    bestCount = kv.Value;
+                }
+            }
+            return best;
+        }
+
         static Sec Find(List<Sec> secs, string name)
         {
             foreach (Sec s in secs) if (s.Name == name) return s;
@@ -379,7 +431,10 @@ function Format-Hoi4GateState {
 
 function Get-Hoi4BackupState {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$ExePath)
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        $ExeGate
+    )
 
     $bak = "$ExePath.backup"
     $state = [pscustomobject]@{
@@ -392,21 +447,37 @@ function Get-Hoi4BackupState {
     if (-not (Test-Path -LiteralPath $bak -PathType Leaf)) { return $state }
 
     $state.Exists = $true
+    $exeGate = if ($null -ne $ExeGate) { $ExeGate } else { Get-Hoi4GateState -ExePath $ExePath }
+    $bakGate = Get-Hoi4GateState -ExePath $bak
+    $state.Gate = $bakGate
+
+    $exeVer = [string]$exeGate.Version
+    $bakVer = [string]$bakGate.Version
+    $verNote = ''
+    if ($exeVer -and $bakVer) {
+        $verNote = if ($exeVer -eq $bakVer) { "版本 $exeVer" } else { "备份 $bakVer，当前 $exeVer" }
+    }
+
     $exeLen = (Get-Item -LiteralPath $ExePath).Length
     $bakLen = (Get-Item -LiteralPath $bak).Length
     if ($bakLen -ne $exeLen) {
-        $state.Reason = '旧版本备份（大小不同，还原会降级游戏）'
+        $state.Reason =
+            if ($exeVer -and $bakVer -and $exeVer -ne $bakVer) { "旧版本备份（$verNote；大小不同）" }
+            elseif ($exeVer -and $bakVer) { "备份大小不同（版本均为 $exeVer，可能损坏或不同安装）" }
+            else { '旧版本备份（大小不同，还原会降级游戏）' }
         return $state
     }
 
-    $bakGate = Get-Hoi4GateState -ExePath $bak
-    $state.Gate = $bakGate
     if ($bakGate.Status -ne 'unpatched') {
         $state.Reason = "备份不可用于还原：$(Format-Hoi4GateState $bakGate)"
         return $state
     }
 
-    $exeGate = Get-Hoi4GateState -ExePath $ExePath
+    if ($exeVer -and $bakVer -and $exeVer -ne $bakVer) {
+        $state.Reason = "旧版本备份（$verNote）"
+        return $state
+    }
+
     if ($exeGate.Status -ne 'patched' -and $exeGate.Status -ne 'unpatched') {
         $state.Reason = "无法验证当前 exe：$(Format-Hoi4GateState $exeGate)"
         return $state
@@ -417,7 +488,7 @@ function Get-Hoi4BackupState {
     }
 
     $state.Usable = $true
-    $state.Reason = '与当前版本匹配（可还原）'
+    $state.Reason = if ($verNote -and $exeVer -eq $bakVer) { "与当前版本匹配（$verNote，可还原）" } else { '与当前版本匹配（可还原）' }
     return $state
 }
 
